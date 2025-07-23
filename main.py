@@ -1,378 +1,642 @@
+"""
+SYSTEM ROZPOZNAWANIA TABLIC REJESTRACYJNYCH - CROSS-PLATFORM
+===========================================================
+
+🌍 UNIWERSALNY SYSTEM - działa na Windows, Linux i macOS
+
+INSTALACJA:
+===========
+
+WINDOWS:
+1. Zainstaluj Python 3.8+ z https://python.org
+2. Otwórz Command Prompt i wykonaj:
+   pip install opencv-python paddleocr paddlepaddle numpy pillow scipy
+
+LINUX (Ubuntu/Debian):
+1. sudo apt update && sudo apt install python3 python3-pip
+2. pip3 install opencv-python paddleocr paddlepaddle numpy pillow scipy
+   # Opcjonalnie dla GPU: pip3 install paddlepaddle-gpu
+
+MACOS:
+1. Zainstaluj Python przez Homebrew: brew install python
+2. pip3 install opencv-python paddleocr paddlepaddle numpy pillow scipy
+
+URUCHOMIENIE:
+=============
+python main.py
+
+KONFIGURACJA KAMERY:
+===================
+- USB kamera: ustaw CAMERA_URL=0 (lub 1, 2...)
+- Kamera IP: ustaw CAMERA_URL=http://adres:port/video
+
+Zmienne środowiskowe:
+- CAMERA_TYPE=usb|ip
+- CAMERA_URL=0|http://...
+- DEBUG_MODE=true|false
+
+FUNKCJONALNOŚĆ CROSS-PLATFORM:
+==============================
+✅ Windows - DirectShow backend, optymalizacje dla stabilności
+✅ Linux - V4L2 backend, GPU support, MJPEG codec
+✅ macOS - AVFoundation backend, uprawnienia kamery
+✅ Automatyczne wykrywanie systemu i dostosowanie
+✅ Uniwersalne ścieżki i katalogi cache
+✅ Optymalizacje specyficzne dla każdego systemu
+
+UWAGI:
+======
+- Pierwsze uruchomienie może trwać kilka minut (pobieranie modeli OCR)
+- System wymaga połączenia internetowego przy pierwszym uruchomieniu
+- Na macOS może być potrzeba udzielenia uprawnień do kamery
+- Na Linux użytkownik musi być w grupie 'video' dla kamer USB
+"""
+
 import os
 import time
 import cv2
-import easyocr
+from paddleocr import PaddleOCR
 import numpy as np
 import sys
 import threading
+import platform
+import pathlib
+import requests
+from dotenv import load_dotenv
 
-# Pobierz konfigurację z ENV
-CAMERA_TYPE = os.getenv('CAMERA_TYPE', 'ip')
-CAMERA_URL = os.getenv('CAMERA_URL', 'http://192.168.1.124:8080/video')
-DEBUG_MODE = os.getenv('DEBUG_MODE', 'true').lower() == 'true'  # Włącz debug domyślnie
+load_dotenv()
+
+# Wykrycie systemu operacyjnego
+SYSTEM_OS = platform.system().lower()
+IS_WINDOWS = SYSTEM_OS == 'windows'
+IS_LINUX = SYSTEM_OS == 'linux'
+IS_MACOS = SYSTEM_OS == 'darwin'
+
+print(f"🖥️  Wykryto system: {platform.system()} {platform.release()}")
+
+# Pobierz konfigurację z ENV - uniwersalną dla wszystkich systemów
+CAMERA_URL = os.getenv('CAMERA_URL', '')
+CAMERA_TYPE = 'usb' if CAMERA_URL.isnumeric() else 'ip'
+DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
+WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
+ANALYSIS_INTERVAL = 3.0  # Co ile sekund analizować klatkę
 
 # Inicjalizacja OCR z mniejszym modelem i timeout
 ocr = None
 
+# Konfiguracja katalogów cache dla różnych systemów
+def get_cache_dir():
+    """Zwróć katalog cache odpowiedni dla systemu operacyjnego"""
+    if IS_WINDOWS:
+        cache_dir = pathlib.Path.home() / "AppData" / "Local" / "PaddleOCR"
+    elif IS_LINUX:
+        cache_dir = pathlib.Path.home() / ".cache" / "paddleocr"
+    elif IS_MACOS:
+        cache_dir = pathlib.Path.home() / "Library" / "Caches" / "paddleocr"
+    else:
+        cache_dir = pathlib.Path.home() / ".paddleocr"
+
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    return str(cache_dir)
+
 def get_camera():
+    """Inicjalizuj kamerę z optymalizacjami dla różnych systemów"""
+
     if CAMERA_TYPE == 'usb':
         try:
             cam_index = int(CAMERA_URL)
         except ValueError:
             cam_index = 0
-        cap = cv2.VideoCapture(cam_index)
+
+        # Różne backendy dla różnych systemów
+        if IS_WINDOWS:
+            # Windows: DirectShow jest często najlepszy
+            cap = cv2.VideoCapture(cam_index, cv2.CAP_DSHOW)
+            if not cap.isOpened():
+                # Fallback na domyślny backend
+                cap = cv2.VideoCapture(cam_index)
+        elif IS_LINUX:
+            # Linux: V4L2 jest native
+            cap = cv2.VideoCapture(cam_index, cv2.CAP_V4L2)
+            if not cap.isOpened():
+                # Fallback na domyślny backend
+                cap = cv2.VideoCapture(cam_index)
+        elif IS_MACOS:
+            # macOS: AVFoundation
+            cap = cv2.VideoCapture(cam_index, cv2.CAP_AVFOUNDATION)
+            if not cap.isOpened():
+                # Fallback na domyślny backend
+                cap = cv2.VideoCapture(cam_index)
+        else:
+            # Nieznany system - użyj domyślnego
+            cap = cv2.VideoCapture(cam_index)
+
     elif CAMERA_TYPE == 'ip':
         cap = cv2.VideoCapture(CAMERA_URL)
     else:
         raise ValueError('Nieznany typ kamery: {}'.format(CAMERA_TYPE))
+
     if not cap.isOpened():
-        raise RuntimeError('Nie można otworzyć kamery!')
+        error_msg = f'Nie można otworzyć kamery!'
+        if CAMERA_TYPE == 'usb':
+            error_msg += f'\n💡 Sprawdź:'
+            if IS_WINDOWS:
+                error_msg += f'\n  - Czy kamera jest podłączona i rozpoznana w Device Manager'
+                error_msg += f'\n  - Czy żadna inna aplikacja nie używa kamery'
+            elif IS_LINUX:
+                error_msg += f'\n  - ls /dev/video* (sprawdź dostępne urządzenia)'
+                error_msg += f'\n  - Uprawnienia użytkownika do grupy video'
+            elif IS_MACOS:
+                error_msg += f'\n  - Uprawnienia do kamery w System Preferences > Privacy'
+        raise RuntimeError(error_msg)
+
+    print(f"📹 Kamera otwarta ({CAMERA_TYPE}): {CAMERA_URL}")
     return cap
+
+def optimize_camera_for_system(cap):
+    """Zastosuj optymalizacje kamery specyficzne dla systemu operacyjnego"""
+    optimizations_applied = 0
+
+    try:
+        # Optymalizacje wspólne dla wszystkich systemów
+        original_fps = cap.get(cv2.CAP_PROP_FPS)
+
+        # OPTYMALIZACJA 1: Ustaw rozdzielczość dla wydajności
+        if cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280) and cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720):
+            width = cap.get(cv2.CAP_PROP_FRAME_WIDTH)
+            height = cap.get(cv2.CAP_PROP_FRAME_HEIGHT)
+            print(f"  ✓ Rozdzielczość: {width:.0f}x{height:.0f}")
+            optimizations_applied += 1
+
+        # OPTYMALIZACJA 2: FPS
+        if cap.set(cv2.CAP_PROP_FPS, 30):
+            new_fps = cap.get(cv2.CAP_PROP_FPS)
+            print(f"  ✓ FPS: {original_fps:.1f} -> {new_fps:.1f}")
+            optimizations_applied += 1
+
+        # Optymalizacje specyficzne dla systemu
+        if IS_WINDOWS:
+            # Windows-specific optimizations
+            if hasattr(cv2, 'CAP_PROP_BUFFER_SIZE'):
+                if cap.set(cv2.CAP_PROP_BUFFER_SIZE, 1):
+                    print("  ✓ Mały bufor kamery (Windows)")
+                    optimizations_applied += 1
+
+        elif IS_LINUX:
+            # Linux-specific optimizations
+            if hasattr(cv2, 'CAP_PROP_BUFFER_SIZE'):
+                if cap.set(cv2.CAP_PROP_BUFFER_SIZE, 2):  # Linux może potrzebować większego bufora
+                    print("  ✓ Zoptymalizowany bufor kamery (Linux)")
+                    optimizations_applied += 1
+
+            # Na Linux często można ustawić fourcc dla lepszej wydajności
+            if hasattr(cap, 'set') and hasattr(cv2, 'VideoWriter_fourcc'):
+                cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc('M', 'J', 'P', 'G'))
+                print("  ✓ Ustawiono MJPEG codec (Linux)")
+                optimizations_applied += 1
+
+        elif IS_MACOS:
+            # macOS-specific optimizations
+            # Na macOS często nie można ustawić BUFFER_SIZE, więc pomijamy
+            print("  ✓ Konfiguracja dla macOS")
+            optimizations_applied += 1
+
+        # OPTYMALIZACJA 3: Wyłącz auto-exposure jeśli dostępne
+        if hasattr(cv2, 'CAP_PROP_AUTO_EXPOSURE'):
+            # Różne systemy mogą mieć różne wartości dla wyłączenia auto-exposure
+            if IS_LINUX:
+                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)  # Linux
+            else:
+                cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0)  # Windows/macOS
+            print("  ✓ Wyłączono auto-exposure")
+            optimizations_applied += 1
+
+        print(f"🚀 Zastosowano {optimizations_applied} optymalizacji dla {platform.system()}")
+
+    except Exception as e:
+        print(f"⚠️ Niektóre optymalizacje kamery niedostępne: {e}")
+        print("  📝 System będzie działał z domyślnymi ustawieniami")
 
 def init_ocr():
     global ocr
     if ocr is None:
         try:
-            print("Inicjalizacja EasyOCR z optymalizacją dla tablic rejestracyjnych...")
-            print("Wyłączanie GPU dla stabilności...")
-            print("Pobieranie modeli może potrwać kilka minut przy pierwszym uruchomieniu...")
+            # Sprawdź instalację przed inicjalizacją
+            print("🔍 Sprawdzanie instalacji PaddlePaddle...")
+            try:
+                import paddle
+                import paddleocr
+                print(f"✅ PaddlePaddle: {paddle.__version__}")
+                print(f"✅ PaddleOCR: {paddleocr.__version__}")
 
-            # EasyOCR z językami polskim i angielskim dla lepszego rozpoznawania polskich tablic
-            # Na Windows używamy domyślnej lokalizacji dla modeli
-            # gpu=False aby uniknąć problemów z CUDA warnings
-            model_storage_dir = os.path.expanduser('~/.EasyOCR')
+                # Test podstawowej funkcjonalności
+                print("🔍 Test GPU/CUDA...")
+                print(f"   paddle.device.get_device(): {paddle.device.get_device()}")
+                try:
+                    cuda_count = paddle.device.cuda.device_count()
+                    print(f"   paddle.device.cuda.device_count(): {cuda_count}")
+                except Exception as e:
+                    print(f"   ⚠️  paddle.device.cuda.device_count() error: {e}")
 
-            ocr = easyocr.Reader(
-                ['en'],  # Angielski model jest najlepszy dla tablic rejestracyjnych
-                model_storage_directory=model_storage_dir,
-                gpu=False,
-                verbose=False,  # wyłącz verbose aby zmniejszyć warnings
-                download_enabled=True  # pozwól na pobieranie modeli przy pierwszym uruchomieniu
+            except ImportError as e:
+                print(f"❌ Błąd importu: {e}")
+                print("💡 Spróbuj: pip install paddlepaddle-gpu paddleocr")
+                return
+            except Exception as e:
+                print(f"❌ Błąd testowania: {e}")
+
+            print("🔧 Inicjalizacja PaddleOCR...")
+            print("UWAGA: Pierwsze uruchomienie może trwać kilka minut - pobieranie modeli...")
+
+            # Sprawdź dostępność GPU na różnych systemach
+            use_gpu = False
+            gpu_info = "CPU"
+
+            try:
+                import paddle
+                print(f"✅ PaddlePaddle zaimportowany: {paddle.__version__}")
+
+                # Nowy sposób detekcji GPU
+                device_info = paddle.device.get_device()
+                cuda_count = 0
+                try:
+                    cuda_count = paddle.device.cuda.device_count()
+                except Exception as e:
+                    print(f"⚠️  paddle.device.cuda.device_count() error: {e}")
+
+                gpu_available = device_info.startswith('gpu') or cuda_count > 0
+
+                if gpu_available:
+                    use_gpu = True
+                    if IS_LINUX:
+                        gpu_info = "GPU/CUDA (Linux)"
+                    elif IS_WINDOWS:
+                        gpu_info = "GPU/CUDA (Windows)"
+                    elif IS_MACOS:
+                        gpu_info = "GPU/Metal (macOS)"
+                    else:
+                        gpu_info = "GPU/CUDA"
+                    print(f"🚀 Wykryto GPU! {gpu_info}")
+                else:
+                    use_gpu = False
+                    if IS_WINDOWS:
+                        gpu_info = "CPU (Windows - brak GPU/CUDA)"
+                    elif IS_LINUX:
+                        gpu_info = "CPU (Linux - brak GPU/CUDA)"
+                    elif IS_MACOS:
+                        gpu_info = "CPU (macOS - brak GPU/Metal)"
+                    else:
+                        gpu_info = "CPU (brak GPU)"
+                    print(f"🔧 Używam: {gpu_info}")
+            except ImportError as import_e:
+                print(f"❌ Błąd importu PaddlePaddle: {import_e}")
+                print("🔧 Używam: CPU (błąd importu Paddle)")
+            except Exception as e:
+                print(f"❌ Nieoczekiwany błąd PaddlePaddle: {e}")
+                print("🔧 Używam: CPU (nie można sprawdzić Paddle)")
+
+            # Katalog cache odpowiedni dla systemu
+            cache_dir = get_cache_dir()
+            print(f"📁 Katalog cache: {cache_dir}")
+
+            # PaddleOCR inicjalizacja uniwersalna dla wszystkich systemów
+            ocr = PaddleOCR(
+                use_angle_cls=True,
+                lang='en',
+                use_gpu=use_gpu,
+                show_log=False,  # wyłącz verbose aby zmniejszyć warnings
+                drop_score=0.3,  # obniż próg pewności dla lepszej detekcji
+                # Użyj systemowego katalogu cache
+                use_pdserving=False,  # Wyłącz serwisy dla lepszej kompatybilności
+                enable_mkldnn=not IS_MACOS  # MKLDNN może nie działać na macOS
             )
 
-            print("EasyOCR gotowy z modelem angielskim (optymalny dla tablic)!")
-            print("Kończę init_ocr()...")
+            print(f"✅ PaddleOCR gotowy na {platform.system()}!")
+
+        except ImportError as e:
+            print(f"❌ Błąd importu PaddleOCR: {e}")
+            print("📦 Zainstaluj wymagane pakiety:")
+            if IS_WINDOWS:
+                print("   pip install paddleocr paddlepaddle")
+                print("   # Dla GPU na Windows: pip install paddlepaddle-gpu")
+                print("   # CUDA 11.8: pip install paddlepaddle-gpu==3.1.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/")
+                print("   # CUDA 12.6: pip install paddlepaddle-gpu==3.1.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/")
+            elif IS_LINUX:
+                print("   pip install paddleocr paddlepaddle")
+                print("   # Dla GPU na Windows/Linux: pip install paddlepaddle-gpu")
+                print("   # CUDA 11.8: pip install paddlepaddle-gpu==3.1.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu118/")
+                print("   # CUDA 12.6: pip install paddlepaddle-gpu==3.1.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/")
+            elif IS_MACOS:
+                print("   pip install paddleocr paddlepaddle")
+            ocr = None
         except Exception as e:
-            print(f"Błąd inicjalizacji OCR: {e}")
-            import traceback
-            traceback.print_exc()
+            print(f"❌ Błąd inicjalizacji OCR: {e}")
+            print("🌐 Sprawdź połączenie internetowe - potrzebne do pobrania modeli")
+            if DEBUG_MODE:
+                import traceback
+                traceback.print_exc()
             ocr = None
 
-def detect_license_plate_regions(frame):
-    """Wykryj potencjalne regiony tablic rejestracyjnych"""
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+def preprocess_image_for_ocr(frame):
+    """Ulepsz obraz przed OCR - specjalnie dla tablic rejestracyjnych"""
+    try:
+        # Konwersja do skali szarości jeśli kolorowy
+        if len(frame.shape) == 3:
+            gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        else:
+            gray = frame
 
-    # Wykrywanie krawędzi
-    edges = cv2.Canny(gray, 50, 150)
+        # Zwiększ kontrast dla lepszej czytelności
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+        enhanced = clahe.apply(gray)
 
-    # Znajdź kontury
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Filtruj szum
+        denoised = cv2.medianBlur(enhanced, 3)
 
-    potential_plates = []
+        # Konwertuj z powrotem do BGR dla PaddleOCR
+        bgr = cv2.cvtColor(denoised, cv2.COLOR_GRAY2BGR)
 
-    for contour in contours:
-        # Oblicz prostokąt otaczający
-        x, y, w, h = cv2.boundingRect(contour)
-
-        # Sprawdź proporcje (tablice mają charakterystyczne proporcje)
-        aspect_ratio = w / h if h > 0 else 0
-        area = w * h
-
-        # Filtruj na podstawie proporcji i rozmiaru
-        if (2.0 <= aspect_ratio <= 6.0 and  # Typowe proporcje tablic
-            area >= 1000 and  # Minimalny rozmiar
-            w >= 80 and h >= 20):  # Minimalne wymiary
-
-            # Dodaj margines wokół wykrytego regionu
-            margin = 10
-            x_start = max(0, x - margin)
-            y_start = max(0, y - margin)
-            x_end = min(frame.shape[1], x + w + margin)
-            y_end = min(frame.shape[0], y + h + margin)
-
-            roi = frame[y_start:y_end, x_start:x_end]
-            if roi.size > 0:
-                potential_plates.append(roi)
-
-    return potential_plates if potential_plates else [frame]
-
-def preprocess_for_ocr(frame):
-    """Przetwarzanie obrazu dla lepszego rozpoznawania OCR"""
-    # Konwersja do skali szarości
-    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-
-    # Zwiększenie kontrastu przy użyciu CLAHE
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
-    enhanced = clahe.apply(gray)
-
-    # Filtracja Gaussa dla redukcji szumu
-    denoised = cv2.GaussianBlur(enhanced, (3, 3), 0)
-
-    # Morfologia - zamknięcie luk w tekście
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-    processed = cv2.morphologyEx(denoised, cv2.MORPH_CLOSE, kernel)
-
-    # Zwiększenie ostrości
-    kernel_sharp = np.array([[-1,-1,-1], [-1,9,-1], [-1,-1,-1]])
-    sharpened = cv2.filter2D(processed, -1, kernel_sharp)
-
-    return sharpened
+        return bgr
+    except Exception as e:
+        if DEBUG_MODE:
+            print(f"Błąd przetwarzania obrazu: {e}")
+        return frame
 
 def detect_and_read_plate(frame):
     global ocr
-    # OCR powinien być już zainicjalizowany w main()
     if ocr is None:
         return None
 
     try:
-        # Najpierw wykryj potencjalne regiony tablic
-        potential_regions = detect_license_plate_regions(frame)
+        # Ulepsz obraz przed OCR
+        processed_frame = preprocess_image_for_ocr(frame)
 
-        if DEBUG_MODE:
-            print(f"Wykryto {len(potential_regions)} potencjalnych regionów tablic")
+        # Uruchom OCR z klasyfikacją kąta dla lepszej detekcji
+        result = ocr.ocr(processed_frame, cls=True)
 
-        # Jeśli nie wykryto regionów, użyj całej klatki
-        if not potential_regions or len(potential_regions) == 0:
-            potential_regions = [frame]
+        if result and len(result) > 0 and result[0] is not None:
             if DEBUG_MODE:
-                print("Używam całej klatki do analizy")
+                print(f"OCR wykrył {len(result[0])} tekstów:")
 
-        all_candidates = []
+            best_candidates = []
 
-                # Przeanalizuj każdy region osobno
-        for i, region in enumerate(potential_regions):
-            if DEBUG_MODE:
-                print(f"Analizuję region {i+1}/{len(potential_regions)}")
+            # Przeszukaj wszystkie wykryte teksty
+            for detection in result[0]:
+                if len(detection) >= 2:
+                    text = detection[1][0].strip()  # detection[1][0] to tekst w PaddleOCR
+                    confidence = detection[1][1]     # detection[1][1] to pewność
 
-            # Przetwarzanie obrazu dla lepszego OCR
-            processed_frame = preprocess_for_ocr(region)
+                    if DEBUG_MODE:
+                        print(f"  '{text}' (pewność: {confidence:.2f})")
 
-            # OCR z uproszczonymi parametrami
-            result = ocr.readtext(processed_frame)
+                    # Wyczyść tekst - usuń spacje i znaki specjalne
+                    import re
+                    clean_text = re.sub(r'[^A-Z0-9]', '', text.upper())
 
-            if result and len(result) > 0:
-                if DEBUG_MODE:
-                    print(f"Region {i+1} OCR wykrył {len(result)} tekstów:")
-
-                # Przeszukaj wszystkie wykryte teksty w tym regionie
-                for detection in result:
-                    if len(detection) >= 2:  # Można mieć tylko 2 elementy zamiast 3
-                        text = detection[1].strip() if len(detection) > 1 else ""
-                        confidence = detection[2] if len(detection) > 2 else 1.0  # Domyślna pewność
-                        bbox = detection[0] if len(detection) > 0 else None
-
-                        if DEBUG_MODE:
-                            print(f"  '{text}' (pewność: {confidence:.2f})")
-
-                        # Filtruj potencjalne tablice rejestracyjne
-                        if is_license_plate(text) and confidence > 0.1:  # Bardzo niski próg pewności
-                            all_candidates.append((text, confidence, bbox))
+                    # Filtruj potencjalne tablice rejestracyjne z niższym progiem
+                    if clean_text and len(clean_text) >= 4 and confidence > 0.3:
+                        if is_license_plate(clean_text):
+                            best_candidates.append((clean_text, confidence))
                             if DEBUG_MODE:
-                                print(f"  -> DODANO DO KANDYDATÓW")
-                        elif DEBUG_MODE:
-                            print(f"  -> ODRZUCONO: is_plate={is_license_plate(text)}, confidence={confidence:.2f}")
-            elif DEBUG_MODE:
-                print(f"Region {i+1}: Brak wykryć OCR")
+                                print(f"  -> Kandydat: '{clean_text}' (pewność: {confidence:.2f})")
 
-                # Wybierz najlepszego kandydata ze wszystkich regionów
-        if all_candidates:
-            if DEBUG_MODE:
-                print(f"Znaleziono {len(all_candidates)} kandydatów na tablice:")
-                for text, conf, _ in all_candidates:
-                    print(f"  - '{text}' ({conf:.2f})")
-
-            # Sortuj według pewności
-            all_candidates.sort(key=lambda x: x[1], reverse=True)
-            best_candidate = all_candidates[0]
-
-            if DEBUG_MODE:
-                print(f"Najlepszy kandydat: '{best_candidate[0]}' ({best_candidate[1]:.2f})")
-
-            # Dodatkowa walidacja najlepszego kandydata
-            clean_text = clean_license_plate_text(best_candidate[0])
-            if DEBUG_MODE:
-                print(f"Po czyszczeniu: '{clean_text}'")
-
-            if clean_text and len(clean_text) >= 3:  # Obniżony próg
-                return clean_text
-            elif DEBUG_MODE:
-                print("Kandydat odrzucony po czyszczeniu")
+            # Zwróć najlepszy kandydat
+            if best_candidates:
+                best_candidates.sort(key=lambda x: x[1], reverse=True)
+                return best_candidates[0][0]
 
         elif DEBUG_MODE:
-            print("Brak kandydatów na tablice rejestracyjne")
+            print("OCR nie wykrył żadnego tekstu")
+
     except Exception as e:
         print(f"Błąd OCR: {e}")
+        if DEBUG_MODE:
+            import traceback
+            traceback.print_exc()
         return None
     return None
 
-def clean_license_plate_text(text):
-    """Czyści i normalizuje tekst tablicy rejestracyjnej"""
-    import re
-
-    # Usuń zbędne znaki i spacje
-    clean_text = re.sub(r'[^A-Z0-9]', '', text.upper())
-
-        # Minimalnie popraw tylko oczywiste błędy OCR
-    # Tylko gdy jesteśmy pewni, że to błąd OCR, nie rzeczywista litera
-    replacements = {
-        'O': '0',  # O -> 0 tylko gdy otoczone cyframi
-        'I': '1',  # I -> 1 tylko gdy otoczone cyframi
-    }
-
-    # Bardzo konserwatywne zastępowanie - tylko oczywiste przypadki
-    result = ""
-    for i, char in enumerate(clean_text):
-        # Zamień tylko gdy znak jest otoczony cyframi z obu stron
-        if (char in replacements and char.isalpha() and
-            i > 0 and i < len(clean_text) - 1 and
-            clean_text[i-1].isdigit() and clean_text[i+1].isdigit()):
-            result += replacements[char]
-        else:
-            result += char
-
-    return result
-
 def is_license_plate(text):
-    """Sprawdź czy tekst może być tablicą rejestracyjną - optymalizowane dla polskich tablic"""
+    """Sprawdź czy tekst może być tablicą rejestracyjną"""
     import re
 
     # Usuń spacje i znaki specjalne
     clean_text = re.sub(r'[^A-Z0-9]', '', text.upper())
 
-    # Sprawdź długość (polskie tablice: 3-8 znaków - obniżony próg)
-    if len(clean_text) < 3 or len(clean_text) > 8:
+    # Sprawdź długość (tablice zwykle 4-8 znaków)
+    if len(clean_text) < 4 or len(clean_text) > 8:
         return False
 
     # Sprawdź czy zawiera cyfry i litery (typowe dla tablic)
     has_letters = bool(re.search(r'[A-Z]', clean_text))
     has_numbers = bool(re.search(r'[0-9]', clean_text))
 
-    if not (has_letters and has_numbers):
+    return has_letters and has_numbers
+
+def test_system():
+    """Test systemu - uniwersalny dla Windows/Linux/macOS"""
+    print(f"=== TEST SYSTEMU {platform.system().upper()} ===")
+
+    # Test OpenCV
+    try:
+        import cv2
+        opencv_version = cv2.__version__
+        print(f"✓ OpenCV {opencv_version} - OK")
+
+        # Sprawdź dostępne właściwości kamery (różne na różnych systemach)
+        available_props = []
+        test_props = [
+            ('BUFFER_SIZE', 'CAP_PROP_BUFFER_SIZE'),
+            ('FPS', 'CAP_PROP_FPS'),
+            ('FRAME_WIDTH', 'CAP_PROP_FRAME_WIDTH'),
+            ('FRAME_HEIGHT', 'CAP_PROP_FRAME_HEIGHT'),
+            ('AUTO_EXPOSURE', 'CAP_PROP_AUTO_EXPOSURE')
+        ]
+
+        for prop_name, prop_attr in test_props:
+            if hasattr(cv2, prop_attr):
+                available_props.append(prop_name)
+
+        if available_props:
+            print(f"  ✓ Dostępne właściwości kamery: {', '.join(available_props)}")
+        else:
+            print(f"  ⚠️ Ograniczone właściwości kamery (OpenCV {opencv_version})")
+
+    except ImportError:
+        print("✗ OpenCV - BRAK")
+        print("📦 Instalacja:")
+        if IS_WINDOWS:
+            print("   pip install opencv-python")
+        elif IS_LINUX:
+            print("   pip install opencv-python")
+            print("   # Lub: sudo apt install python3-opencv")
+        elif IS_MACOS:
+            print("   pip install opencv-python")
+            print("   # Lub: brew install opencv")
         return False
 
-    # Dodatkowe wzorce dla polskich tablic rejestracyjnych
-    polish_patterns = [
-        r'^[A-Z]{2,3}[0-9]{2,5}$',      # Standard: XX123, XXX1234
-        r'^[A-Z]{1,2}[0-9]{3,4}[A-Z]{1,2}$',  # Starsze: X123Y, XX12YZ
-        r'^[0-9]{2,3}[A-Z]{2,3}[0-9]{2,3}$',  # Alternatywne: 12XX34
-        r'^[A-Z][0-9]{4,5}$',           # Specjalne: X12345
-        r'^[0-9][A-Z]{2}[0-9]{3,4}$'   # Inne: 1XX234
-    ]
-
-    # Sprawdź czy pasuje do któregoś z wzorców
-    for pattern in polish_patterns:
-        if re.match(pattern, clean_text):
-            return True
-
-    # Podstawowe sprawdzenie struktury (fallback)
-    # Minimum 2 litery i 2 cyfry
-    letter_count = len(re.findall(r'[A-Z]', clean_text))
-    digit_count = len(re.findall(r'[0-9]', clean_text))
-
-    if letter_count >= 2 and digit_count >= 2:
-        return True
-
-    # Odrzuć oczywiste błędy
-    if clean_text in ["TEST", "ERROR", "NULL", "NONE", "VOID"]:
+    # Test PaddleOCR
+    try:
+        from paddleocr import PaddleOCR
+        print("✓ PaddleOCR import - OK")
+    except ImportError:
+        print("✗ PaddleOCR - BRAK")
+        print("Zainstaluj: pip install paddleocr paddlepaddle")
         return False
 
-    return False
+    # Test numpy
+    try:
+        import numpy as np
+        print("✓ NumPy - OK")
+    except ImportError:
+        print("✗ NumPy - BRAK")
+        return False
 
-def main():
-    # Inicjalizacja OCR przed połączeniem z kamerą
-    print("Inicjalizacja systemu rozpoznawania tablic...")
-    init_ocr()
-    print("Po wywołaniu init_ocr()")
+    print("✓ Wszystkie wymagane biblioteki dostępne")
+    return True
 
-    if ocr is None:
-        print("Błąd: Nie można zainicjalizować OCR!")
+def send_to_webhook(plate):
+    """Wysyła dane do webhooku"""
+
+    if WEBHOOK_URL == "":
+        print(f"Pomijam wysyłanie do webhooku - WEBHOOK_URL jest pusty")
         return
 
-    print("OCR zainicjalizowany, łączę z kamerą...")
+    try:
+        response = requests.post(WEBHOOK_URL, json={"plate": plate})
+        if response.status_code == 200:
+            print(f"✅ Wysłano do webhooku: {plate}")
+        else:
+            print(f"❌ Błąd przy wysyłaniu do webhooku: {response.status_code}")
+    except Exception as e:
+        print(f"❌ Błąd przy wysyłaniu do webhooku: {e}")
+
+def main():
+    print("=== SYSTEM ROZPOZNAWANIA TABLIC REJESTRACYJNYCH ===")
+    print(f"🌍 Uniwersalny system dla {platform.system()}")
+    print()
+
+    # Test systemu - sprawdź kompatybilność
+    if not test_system():
+        print(f"\n❌ Błąd: Nie wszystkie wymagane komponenty są dostępne na {platform.system()}!")
+        print("📦 Zainstaluj brakujące pakiety i spróbuj ponownie.")
+        return
+
+    print()
+
+    # Inicjalizacja OCR
+    print("🔧 Inicjalizacja PaddleOCR...")
+    init_ocr()
+
+    if ocr is None:
+        print("❌ Błąd: Nie można zainicjalizować PaddleOCR!")
+        print("🌐 Sprawdź połączenie internetowe - potrzebne do pobrania modeli")
+        return
+
+    print("✅ PaddleOCR zainicjalizowany")
+    print("📹 Łączę z kamerą...")
 
     # Połączenie z kamerą
     try:
         cap = get_camera()
-        print(f"Połączono z kamerą ({CAMERA_TYPE}): {CAMERA_URL}")
+
+        # Optymalizacje kamery specyficzne dla systemu
+        print("🔧 Konfiguruję optymalizacje kamery...")
+        optimize_camera_for_system(cap)
+
     except Exception as e:
-        print(f"Błąd połączenia z kamerą: {e}")
+        print(f"❌ Błąd połączenia z kamerą: {e}")
         return
 
-    print("System gotowy - rozpoczynam rozpoznawanie tablic rejestracyjnych...")
+    print()
+    print(f"🚗 SYSTEM AKTYWNY - {platform.system()} - rozpoznawanie tablic...")
+    print("⌨️  Naciśnij Ctrl+C aby zatrzymać")
+    print("-" * 50)
 
     try:
         frame_count = 0
+        detections_count = 0
         last_detection_time = 0
-        detection_cooldown = 2  # Sekundy między detekcjami dla tej samej tablicy
-        last_detected_plate = ""
-        consecutive_detections = {}  # Zliczanie kolejnych wykryć tej samej tablicy
+        detection_cooldown = 3  # Sekundy między powtarzającymi się detekcjami
+        last_detected = ""
+
+        # Zmienne dla kontroli analizy co 3 sekundy
+        last_analysis_time = 0
+        analysis_running = False
 
         while True:
             ret, frame = cap.read()
             if not ret:
-                print("Brak obrazu z kamery!")
-                if DEBUG_MODE:
-                    print(f"Kamera: {CAMERA_TYPE}, URL: {CAMERA_URL}")
-                time.sleep(1)
+                print("⚠️  Brak obrazu z kamery! Próbuję ponownie...")
+                time.sleep(2)
                 continue
-
-            if DEBUG_MODE and frame_count == 0:
-                print(f"Pierwsza klatka otrzymana! Rozmiar: {frame.shape}")
 
             frame_count += 1
             current_time = time.time()
 
-            # Przetwarzaj co 3 klatki dla lepszej wydajności
-            if frame_count % 3 != 0:
-                continue
+            # Status co 30 sekund
+            if frame_count % 100 == 0:  # ~co 30s przy 3fps
+                print(f"📊 Status: {frame_count} klatek, {detections_count} wykryć")
 
-            if DEBUG_MODE and frame_count % 30 == 0:
-                print(f"Przetworzono {frame_count} klatek...")
+            # Sprawdź czy można wykonać analizę (co 3 sekundy i jeśli nie trwa aktualnie)
+            if ((current_time - last_analysis_time) >= ANALYSIS_INTERVAL and not analysis_running):
+                if DEBUG_MODE:
+                    print(f"[{time.strftime('%H:%M:%S')}] Rozpoczynam analizę klatki...")
 
-            if DEBUG_MODE:
-                print(f"\n--- ANALIZA KLATKI {frame_count} ---")
+                analysis_running = True
+                last_analysis_time = current_time
 
-            # Wykrywanie tablicy
-            plate = detect_and_read_plate(frame)
+                analysis_started_at = time.time()
+                # Rozpoznawanie tablicy
+                plate = detect_and_read_plate(frame)
 
-            if DEBUG_MODE:
-                print(f"Wynik analizy: {plate if plate else 'BRAK'}")
-                print("--- KONIEC ANALIZY ---\n")
+                analysis_ended_at = time.time()
+                analysis_duration = analysis_ended_at - analysis_started_at
 
-            if plate:
-                # Sprawdź czy to ta sama tablica co poprzednio
-                if plate == last_detected_plate and (current_time - last_detection_time) < detection_cooldown:
-                    continue
+                analysis_running = False  # Zakończ flagę analizy
 
-                # Zliczaj kolejne wykrycia tej samej tablicy dla potwierdzenia
-                if plate in consecutive_detections:
-                    consecutive_detections[plate] += 1
-                else:
-                    consecutive_detections[plate] = 1
-                    # Wyczyść stare wykrycia
-                    for old_plate in list(consecutive_detections.keys()):
-                        if old_plate != plate:
-                            consecutive_detections[old_plate] = 0
+                if plate:
+                    # Unikaj duplikatów w krótkim czasie
+                    if (plate != last_detected or
+                        (current_time - last_detection_time) >= detection_cooldown):
 
-                # Wyświetl tylko jeśli tablica została wykryta co najmniej 2 razy
-                if consecutive_detections[plate] >= 2:
-                    print(f"TABLICA POTWIERDZONA: {plate} (wykryto {consecutive_detections[plate]} razy)")
-                    last_detected_plate = plate
-                    last_detection_time = current_time
-                    consecutive_detections = {}  # Resetuj liczniki
-                elif DEBUG_MODE:
-                    print(f"TABLICA KANDYDAT: {plate} (wymaga potwierdzenia)")
+                        detections_count += 1
+                        timestamp = time.strftime("%H:%M:%S", time.localtime())
+                        print(f"🎯 [{timestamp}] WYKRYTO TABLICĘ: {plate} w ciągu {analysis_duration:.2f} sekund")
 
-            time.sleep(0.1)  # Krótsze opóźnienie dla lepszej responsywności
+                        # Wysyłanie do webhook
+                        send_to_webhook(plate)
+
+                        last_detected = plate
+                        last_detection_time = current_time
+            elif analysis_running and DEBUG_MODE:
+                print(f"[{time.strftime('%H:%M:%S')}] Pomijam iterację - analiza w toku...")
+            elif DEBUG_MODE and (current_time - last_analysis_time) < ANALYSIS_INTERVAL:
+                # Ten debug można usunąć jeśli będzie za dużo komunikatów
+                pass
+
+            # Przetwarzaj co ~3 klatki dla lepszej wydajności
+            if frame_count % 3 == 0:
+                time.sleep(0.1)
+            else:
+                time.sleep(0.03)
+
     except KeyboardInterrupt:
-        print("Zatrzymano przez użytkownika")
+        print("\n" + "="*50)
+        print("🛑 Zatrzymano przez użytkownika")
+        print(f"📈 Statystyki: {frame_count} klatek, {detections_count} wykryć")
     except Exception as e:
-        print(f"Błąd podczas przetwarzania: {e}")
-        import traceback
-        traceback.print_exc()
+        print(f"\n❌ Błąd podczas przetwarzania: {e}")
+        if DEBUG_MODE:
+            import traceback
+            traceback.print_exc()
     finally:
-        cap.release()
-        print("Kamera zwolniona")
+        try:
+            cap.release()
+            print("📷 Kamera zwolniona")
+        except:
+            pass
+        print(f"👋 Do widzenia z {platform.system()}!")
 
 if __name__ == "__main__":
     main()
