@@ -1,57 +1,3 @@
-"""
-SYSTEM ROZPOZNAWANIA TABLIC REJESTRACYJNYCH - CROSS-PLATFORM
-===========================================================
-
-🌍 UNIWERSALNY SYSTEM - działa na Windows, Linux i macOS
-
-INSTALACJA:
-===========
-
-WINDOWS:
-1. Zainstaluj Python 3.8+ z https://python.org
-2. Otwórz Command Prompt i wykonaj:
-   pip install opencv-python paddleocr paddlepaddle numpy pillow scipy
-
-LINUX (Ubuntu/Debian):
-1. sudo apt update && sudo apt install python3 python3-pip
-2. pip3 install opencv-python paddleocr paddlepaddle numpy pillow scipy
-   # Opcjonalnie dla GPU: pip3 install paddlepaddle-gpu
-
-MACOS:
-1. Zainstaluj Python przez Homebrew: brew install python
-2. pip3 install opencv-python paddleocr paddlepaddle numpy pillow scipy
-
-URUCHOMIENIE:
-=============
-python main.py
-
-KONFIGURACJA KAMERY:
-===================
-- USB kamera: ustaw CAMERA_URL=0 (lub 1, 2...)
-- Kamera IP: ustaw CAMERA_URL=http://adres:port/video
-
-Zmienne środowiskowe:
-- CAMERA_TYPE=usb|ip
-- CAMERA_URL=0|http://...
-- DEBUG_MODE=true|false
-
-FUNKCJONALNOŚĆ CROSS-PLATFORM:
-==============================
-✅ Windows - DirectShow backend, optymalizacje dla stabilności
-✅ Linux - V4L2 backend, GPU support, MJPEG codec
-✅ macOS - AVFoundation backend, uprawnienia kamery
-✅ Automatyczne wykrywanie systemu i dostosowanie
-✅ Uniwersalne ścieżki i katalogi cache
-✅ Optymalizacje specyficzne dla każdego systemu
-
-UWAGI:
-======
-- Pierwsze uruchomienie może trwać kilka minut (pobieranie modeli OCR)
-- System wymaga połączenia internetowego przy pierwszym uruchomieniu
-- Na macOS może być potrzeba udzielenia uprawnień do kamery
-- Na Linux użytkownik musi być w grupie 'video' dla kamer USB
-"""
-
 import os
 import time
 import cv2
@@ -87,7 +33,10 @@ ocr = None
 # Konfiguracja katalogów cache dla różnych systemów
 def get_cache_dir():
     """Zwróć katalog cache odpowiedni dla systemu operacyjnego"""
-    if IS_WINDOWS:
+    # W środowisku Docker używaj lokalnego katalogu
+    if os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true':
+        cache_dir = pathlib.Path("/app/.cache/paddleocr")
+    elif IS_WINDOWS:
         cache_dir = pathlib.Path.home() / "AppData" / "Local" / "PaddleOCR"
     elif IS_LINUX:
         cache_dir = pathlib.Path.home() / ".cache" / "paddleocr"

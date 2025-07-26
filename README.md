@@ -9,6 +9,8 @@ Aplikacja do rozpoznawania tablic rejestracyjnych z obrazu w czasie rzeczywistym
 
 ## Instalacja
 
+### Opcja 1: Instalacja lokalna
+
 1. **Klonuj repozytorium:**
    ```bash
    git clone <adres_repozytorium>
@@ -34,6 +36,39 @@ Aplikacja do rozpoznawania tablic rejestracyjnych z obrazu w czasie rzeczywistym
    pip install opencv-python
    ```
 
+### Opcja 2: Uruchomienie w Docker
+
+#### Wymagania Docker:
+- Docker i Docker Compose
+- (Dla GPU) NVIDIA Docker Runtime
+
+#### Uruchomienie:
+
+1. **Buduj i uruchom z Docker Compose:**
+   ```bash
+   docker-compose up --build
+   ```
+   > **Uwaga:** Pierwsze budowanie może potrwać dłużej - modele PaddleOCR są pobierane podczas budowania obrazu.
+
+2. **Lub uruchom tylko główną aplikację:**
+   ```bash
+   docker-compose up license-plate-detector
+   ```
+
+3. **Uruchom z symulatorem kamery (do testów):**
+   ```bash
+   docker-compose --profile camera-simulator up
+   ```
+
+#### Uruchomienie bez Docker Compose:
+```bash
+# Buduj obraz (pobierze modele podczas budowania)
+docker build -t license-plate-detector .
+
+# Uruchom kontener
+docker run --gpus all -e CAMERA_URL=http://twoja.kamera.ip:port/video license-plate-detector
+```
+
 ## Konfiguracja
 
 Aplikacja korzysta z kilku zmiennych środowiskowych:
@@ -49,10 +84,22 @@ Przykład uruchomienia z parametrami:
 CAMERA_TYPE=usb CAMERA_URL=0 DEBUG_MODE=false WEBHOOK_URL=https://twoj.webhook.url python main.py
 ```
 
+### Konfiguracja Docker:
+Edytuj `docker-compose.yml` lub przekaż zmienne środowiskowe:
+```bash
+docker run -e CAMERA_URL=http://192.168.1.100:8080/video -e WEBHOOK_URL=https://twoj.webhook.url license-plate-detector
+```
+
 ## Uruchomienie
 
+### Lokalnie:
 ```bash
 python main.py
+```
+
+### W Docker:
+```bash
+docker-compose up
 ```
 
 Pierwsze uruchomienie może potrwać dłużej (pobieranie modeli OCR).
@@ -66,6 +113,7 @@ Pierwsze uruchomienie może potrwać dłużej (pobieranie modeli OCR).
 - **Brak modułu:** Zainstaluj brakujące pakiety poleceniem `pip install ...`.
 - **Brak obrazu z kamery:** Sprawdź poprawność `CAMERA_URL` i podłączenie kamery.
 - **Brak wsparcia GPU:** Upewnij się, że masz zainstalowane `paddlepaddle-gpu` zgodne z Twoją wersją CUDA.
+- **Problem z Docker GPU:** Sprawdź czy masz zainstalowany NVIDIA Docker Runtime.
 
 ## Kontakt
 W razie problemów lub pytań: Artur Czuba
