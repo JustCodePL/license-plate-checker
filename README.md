@@ -42,7 +42,19 @@ Aplikacja do rozpoznawania tablic rejestracyjnych z obrazu w czasie rzeczywistym
 - Docker i Docker Compose
 - (Dla GPU) NVIDIA Docker Runtime
 
-#### Uruchomienie:
+#### Szybkie uruchomienie z Docker Hub:
+
+1. **Pobierz i uruchom obraz z Docker Hub:**
+   ```bash
+   docker run --gpus all -e CAMERA_URL=http://twoja.kamera.ip:port/video justcodepl/license-plate-checker
+   ```
+
+2. **Uruchom z Docker Compose (jeśli masz docker-compose.yml):**
+   ```bash
+   docker-compose up
+   ```
+
+#### Budowanie lokalne:
 
 1. **Buduj i uruchom z Docker Compose:**
    ```bash
@@ -87,6 +99,10 @@ CAMERA_TYPE=usb CAMERA_URL=0 DEBUG_MODE=false WEBHOOK_URL=https://twoj.webhook.u
 ### Konfiguracja Docker:
 Edytuj `docker-compose.yml` lub przekaż zmienne środowiskowe:
 ```bash
+# Uruchomienie z Docker Hub
+docker run --gpus all -e CAMERA_URL=http://192.168.1.100:8080/video -e WEBHOOK_URL=https://twoj.webhook.url justcodepl/license-plate-checker
+
+# Lub dla lokalnie zbudowanego obrazu
 docker run -e CAMERA_URL=http://192.168.1.100:8080/video -e WEBHOOK_URL=https://twoj.webhook.url license-plate-detector
 ```
 

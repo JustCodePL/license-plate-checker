@@ -4,7 +4,7 @@ services:
     container_name: license-plate-detector
     environment:
       - CAMERA_URL=http://192.168.1.115:4747/video
-      - DEBUG_MODE=true
+      - DEBUG_MODE=false
     volumes:
       - ./main.py:/app/main.py
     restart: unless-stopped
