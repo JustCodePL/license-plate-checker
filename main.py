@@ -12,6 +12,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+print(f"AAA {os.environ.get('DOCKER_CONTAINER')}")
+
 # Wykrycie systemu operacyjnego
 SYSTEM_OS = platform.system().lower()
 IS_WINDOWS = SYSTEM_OS == 'windows'
@@ -29,24 +31,6 @@ ANALYSIS_INTERVAL = 3.0  # Co ile sekund analizować klatkę
 
 # Inicjalizacja OCR z mniejszym modelem i timeout
 ocr = None
-
-# Konfiguracja katalogów cache dla różnych systemów
-def get_cache_dir():
-    """Zwróć katalog cache odpowiedni dla systemu operacyjnego"""
-    # W środowisku Docker używaj lokalnego katalogu
-    if os.path.exists('/.dockerenv') or os.environ.get('DOCKER_CONTAINER') == 'true':
-        cache_dir = pathlib.Path("/app/.cache/paddleocr")
-    elif IS_WINDOWS:
-        cache_dir = pathlib.Path.home() / "AppData" / "Local" / "PaddleOCR"
-    elif IS_LINUX:
-        cache_dir = pathlib.Path.home() / ".cache" / "paddleocr"
-    elif IS_MACOS:
-        cache_dir = pathlib.Path.home() / "Library" / "Caches" / "paddleocr"
-    else:
-        cache_dir = pathlib.Path.home() / ".paddleocr"
-
-    cache_dir.mkdir(parents=True, exist_ok=True)
-    return str(cache_dir)
 
 def get_camera():
     """Inicjalizuj kamerę z optymalizacjami dla różnych systemów"""
@@ -243,10 +227,6 @@ def init_ocr():
             except Exception as e:
                 print(f"❌ Nieoczekiwany błąd PaddlePaddle: {e}")
                 print("🔧 Używam: CPU (nie można sprawdzić Paddle)")
-
-            # Katalog cache odpowiedni dla systemu
-            cache_dir = get_cache_dir()
-            print(f"📁 Katalog cache: {cache_dir}")
 
             # PaddleOCR inicjalizacja uniwersalna dla wszystkich systemów
             ocr = PaddleOCR(

@@ -1,6 +1,5 @@
 # Użyj oficjalnego obrazu Python z CUDA dla obsługi GPU
-FROM nvidia/cuda:11.8-devel-ubuntu20.04
-
+FROM nvidia/cuda:11.8.0-devel-ubuntu20.04
 # Ustaw zmienne środowiskowe
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -8,16 +7,19 @@ ENV PYTHONDONTWRITEBYTECODE=1
 
 # Zainstaluj systemowe zależności
 RUN apt-get update && apt-get install -y \
-    python3 \
+    software-properties-common \
+    && add-apt-repository ppa:deadsnakes/ppa \
+    && apt-get update && apt-get install -y \
+    python3.9 \
+    python3.9-dev \
+    python3.9-distutils \
     python3-pip \
-    python3-dev \
     libgl1-mesa-glx \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
     libxrender-dev \
     libgomp1 \
-    libgthread-2.0-0 \
     libgtk-3-0 \
     libavcodec-dev \
     libavformat-dev \
@@ -33,7 +35,11 @@ RUN apt-get update && apt-get install -y \
     wget \
     curl \
     git \
+    pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.9 1
+RUN python3 -m pip install --upgrade pip
 
 # Utwórz katalog roboczy
 WORKDIR /app
@@ -80,11 +86,12 @@ echo "Budowanie obrazu zakończone!"' > /app/download_models.sh
 RUN chmod +x /app/download_models.sh
 
 # Pobierz modele podczas budowania obrazu
-RUN /app/download_models.sh
 
 # Utwórz użytkownika nie-root dla bezpieczeństwa
 RUN useradd -m -u 1000 appuser && chown -R appuser:appuser /app
 USER appuser
+
+RUN /app/download_models.sh
 
 # Ustaw domyślne zmienne środowiskowe
 ENV CAMERA_TYPE=ip

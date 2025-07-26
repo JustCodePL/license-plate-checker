@@ -1,44 +1,17 @@
-version: '3.8'
-
 services:
   license-plate-detector:
     build: .
     container_name: license-plate-detector
     environment:
-      # Konfiguracja kamery
-      - CAMERA_TYPE=ip
-      - CAMERA_URL=http://192.168.1.124:8080/video
-      # Tryb debugowania
+      - CAMERA_URL=http://192.168.1.115:4747/video
       - DEBUG_MODE=true
-      # URL webhooka do wysyłania wykrytych tablic
-      - WEBHOOK_URL=https://n8n.czubaartur.pl/webhook/94c86eeb-6125-4ca6-a23c-056326f5ef64
-    restart: unless-stopped
-    # Uruchom z obsługą GPU (wymaga nvidia-docker)
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
-    networks:
-      - app-network
-
-  # Przykład kamery IP (opcjonalnie)
-  ip-camera:
-    image: nginx:alpine
-    container_name: ip-camera-simulator
-    ports:
-      - "8080:80"
     volumes:
-      - ./test-video.mp4:/usr/share/nginx/html/video.mp4
-    command: >
-      sh -c "echo 'server { listen 80; location /video { return 200 \"video.mp4\"; } }' > /etc/nginx/conf.d/default.conf && nginx -g 'daemon off;'"
-    networks:
-      - app-network
-    profiles:
-      - camera-simulator
-
-networks:
-  app-network:
-    driver: bridge
+      - ./main.py:/app/main.py
+    restart: unless-stopped
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
