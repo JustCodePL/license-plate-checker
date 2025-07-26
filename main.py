@@ -27,7 +27,6 @@ CAMERA_URL = os.getenv('CAMERA_URL', '')
 CAMERA_TYPE = 'usb' if CAMERA_URL.isnumeric() else 'ip'
 DEBUG_MODE = os.getenv('DEBUG_MODE', 'false').lower() == 'true'
 WEBHOOK_URL = os.getenv('WEBHOOK_URL', '')
-ANALYSIS_INTERVAL = 3.0  # Co ile sekund analizować klatkę
 
 # Inicjalizacja OCR z mniejszym modelem i timeout
 ocr = None
@@ -82,6 +81,10 @@ def get_camera():
             elif IS_MACOS:
                 error_msg += f'\n  - Uprawnienia do kamery w System Preferences > Privacy'
         raise RuntimeError(error_msg)
+
+    # OPTYMALIZACJE DLA AKTUALNOŚCI KLATEK
+    # Ustaw mały bufor aby zawsze pobierać najnowsze klatki
+    cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
 
     print(f"📹 Kamera otwarta ({CAMERA_TYPE}): {CAMERA_URL}")
     return cap
@@ -483,37 +486,31 @@ def main():
     print("-" * 50)
 
     try:
-        frame_count = 0
-        detections_count = 0
-        last_detection_time = 0
-        detection_cooldown = 3  # Sekundy między powtarzającymi się detekcjami
-        last_detected = ""
-
-        # Zmienne dla kontroli analizy co 3 sekundy
-        last_analysis_time = 0
         analysis_running = False
 
         while True:
-            ret, frame = cap.read()
-            if not ret:
-                print("⚠️  Brak obrazu z kamery! Próbuję ponownie...")
-                time.sleep(2)
-                continue
+            if (not analysis_running):
+                # OPRÓŻNIJ BUFOR - pobieraj klatki przez 0.5 sekundy
+                start_flush = time.time()
+                flushed = 0
+                while time.time() - start_flush < 0.5:
+                    cap.grab()
+                    flushed += 1
+                if DEBUG_MODE:
+                    print(f"[DEBUG] Opróżniono bufor, odrzucono {flushed} klatek")
 
-            frame_count += 1
-            current_time = time.time()
+                # POCZEKAJ NA NOWĄ KLATKĘ
+                time.sleep(0.05)  # 50 ms
+                ret, frame = cap.read()
+                if not ret:
+                    print("⚠️  Brak obrazu z kamery! Próbuję ponownie za 2 sekundy...")
+                    time.sleep(2)
+                    continue
 
-            # Status co 30 sekund
-            if frame_count % 100 == 0:  # ~co 30s przy 3fps
-                print(f"📊 Status: {frame_count} klatek, {detections_count} wykryć")
-
-            # Sprawdź czy można wykonać analizę (co 3 sekundy i jeśli nie trwa aktualnie)
-            if ((current_time - last_analysis_time) >= ANALYSIS_INTERVAL and not analysis_running):
                 if DEBUG_MODE:
                     print(f"[{time.strftime('%H:%M:%S')}] Rozpoczynam analizę klatki...")
 
                 analysis_running = True
-                last_analysis_time = current_time
 
                 analysis_started_at = time.time()
                 # Rozpoznawanie tablicy
@@ -525,35 +522,13 @@ def main():
                 analysis_running = False  # Zakończ flagę analizy
 
                 if plate:
-                    # Unikaj duplikatów w krótkim czasie
-                    if (plate != last_detected or
-                        (current_time - last_detection_time) >= detection_cooldown):
-
-                        detections_count += 1
-                        timestamp = time.strftime("%H:%M:%S", time.localtime())
-                        print(f"🎯 [{timestamp}] WYKRYTO TABLICĘ: {plate} w ciągu {analysis_duration:.2f} sekund")
-
-                        # Wysyłanie do webhook
-                        send_to_webhook(plate)
-
-                        last_detected = plate
-                        last_detection_time = current_time
-            elif analysis_running and DEBUG_MODE:
-                print(f"[{time.strftime('%H:%M:%S')}] Pomijam iterację - analiza w toku...")
-            elif DEBUG_MODE and (current_time - last_analysis_time) < ANALYSIS_INTERVAL:
-                # Ten debug można usunąć jeśli będzie za dużo komunikatów
-                pass
-
-            # Przetwarzaj co ~3 klatki dla lepszej wydajności
-            if frame_count % 3 == 0:
-                time.sleep(0.1)
-            else:
-                time.sleep(0.03)
+                    timestamp = time.strftime("%H:%M:%S", time.localtime())
+                    print(f"🎯 [{timestamp}] WYKRYTO TABLICĘ: {plate} w ciągu {analysis_duration:.2f} sekund")
+                    send_to_webhook(plate)
 
     except KeyboardInterrupt:
         print("\n" + "="*50)
         print("🛑 Zatrzymano przez użytkownika")
-        print(f"📈 Statystyki: {frame_count} klatek, {detections_count} wykryć")
     except Exception as e:
         print(f"\n❌ Błąd podczas przetwarzania: {e}")
         if DEBUG_MODE:
